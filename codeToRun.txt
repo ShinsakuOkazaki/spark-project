@@ -1,0 +1,9 @@
+# to submit python script to spark
+spark-submit --master spark://localhost:7077 YOUR-PYTHON.py INPUT OUTPUT
+
+# to start spark
+start-all.sh
+
+# to stop spark
+stop-all.sh
+
