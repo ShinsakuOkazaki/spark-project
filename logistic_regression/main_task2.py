@@ -90,7 +90,7 @@ if __name__ == "__main__":
     num_iteration = 100
     learningRate = 0.01
     r_prev= np.full(20000, 0.01)
-    count = 0
+    count = 0.0
     cost_prev = sys.float_info.max
     precision = 0.00000001
     prev_stepsize = 1
@@ -123,7 +123,7 @@ if __name__ == "__main__":
         print("W: " ,r_cur)
         print("Loss: ", cost_cur)
 
-        count += 1
+        count += 1.0
 
         # Calculate stepsize
         prev_stepsize = np.linalg.norm(np.subtract(r_prev, r_cur), 2)

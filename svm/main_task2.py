@@ -8,7 +8,12 @@ import time
 from pyspark import SparkContext
 from operator import add
 
-# Function to make build array
+def oneHotEncoding(ID):
+    if re.compile('^AU').match(ID):
+        return 1
+    else:
+        return 0
+
 def buildArray (listOfIndices):
     returnVal = np.zeros (20000)
     for index in listOfIndices:
@@ -17,41 +22,6 @@ def buildArray (listOfIndices):
     returnVal = np.divide (returnVal, mysum)
     return returnVal
 
-# Function to perform one-hot-encoding based on label ID
-def oneHotEncoding(ID):
-    if re.compile('^AU').match(ID):
-        return 1
-    else:
-        return 0
-
-# Function to calculate theta for each row of RDD
-def calculateTheta(x, r_prev):
-    return np.dot(x, r_prev)
-# Function to calculate log part of llh for each row of RDD
-def getLogPart(theta):
-    return np.log(1 + np.exp(theta))
-# Function to calculate multiplication of x and y.
-def calculateXtY(x, y):
-    return -np.multiply(x, y)
-# Function to calculate multiplication of x and theta.
-def getXMultiplyThetaPart(x, theta):
-    return np.multiply(x, (np.exp(theta) / (1.0 + np.exp(theta))))
-# Function to calculate multiplication of y and theta.
-def getYMultiplyTheta(y, theta):
-    return -np.multiply(y, theta)
-# Function to get derivative.
-def getDerivative(x, y, theta):
-    XtY = calculateXtY(x, y)
-    XTheta = getXMultiplyThetaPart(x, theta)
-    derivative = np.add(XtY, XTheta)
-    return derivative
-# Function to get LLH
-def getLLH(x, y, theta):
-    Ytheta = getYMultiplyTheta(y, theta)
-    logPart = getLogPart(theta)
-    cost = np.add(Ytheta, logPart)
-    return cost
-#Function to get type 1 erro and type 2 error
 def getType1AndType2(true, pred):
     if true == 1.0 and pred == 1.0:
         TP = 1.0
@@ -71,22 +41,44 @@ def getType1AndType2(true, pred):
         FP = 0.0
     
     return np.array([TP, TN, FN, FP])
-# Function to get F1score
+
+def getPreMargin(scores, yi_scores):
+    # max(0, xw - xw_true) + delta
+    return np.maximum(0.0, np.subtract(scores, yi_scores) + 1)
+
+def changeToZero(preMargins, y):
+    preMargins[y] = 0.0
+    return preMargins
+
+def getBinary(margins):
+    margins[margins > 0.0] = 1.0
+    return margins
+
+def changeToRowSum(binary, y, row_sum):
+    binary[y] = - row_sum
+    return binary
+
+def getDw(x, b):
+    return np.array([x * b[0], x * b[1]])
+
 def getF1score(TP, TN, FN, FP):
-    if TP == 0.0:
-        return 0.0
+    if TP == 0:
+        return 0
     precision = TP / (TP + FP)
     recall = TP / (TP + FN)
-    f_score = 2.0 * (precision * recall) / (precision + recall)
+    f_score = 2 * (precision * recall) / (precision + recall)
     return f_score
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
+    if len(sys.argv) != 3:
         print("Usage: wordcount <file> <output> ", file=sys.stderr)
         exit(-1)
 
     sc = SparkContext(appName="LogisticRegression")
+    read_start = time.time()
     d_corpus = sc.textFile(sys.argv[1], 1)
+    read_stop = time.time()
+    read_duration = read_stop - read_start
     # Get important parts
     d_keyAndText = d_corpus.map(lambda x : (x[x.index('id="') + 4 : x.index('" url=')], x[x.index('">') + 2:][:-6]))
     regex = re.compile('[^a-zA-Z]')
@@ -111,57 +103,75 @@ if __name__ == "__main__":
 
     # Make label 0 or 1.
     data = tfs.map(lambda x: (oneHotEncoding(x[0]), x[1])).cache()
-    
+
+    # Get sample number of train data
+    num_train = data.count()
+
+    def svm_loss(W, reg):
+        # Set initial dW as zero
+        dW = np.zeros(W.shape)
+        # To get scores do dot product of X (n, 200000) and W (200000, 2)
+        scores = data.map(lambda x: (x[0], x[1], np.dot(x[1], W)))
+        # Select one correctly categorized point.
+        yi_scores = scores.map(lambda x: (x[0], x[1], x[2], x[2][x[0]]))
+        # Calculate margin and ignore the correctlly classified points by setting them 0.
+        preMargins = yi_scores.map(lambda x: (x[0], x[1], getPreMargin(x[2], x[3])))
+        margins = preMargins.map(lambda x: (x[0], x[1], changeToZero(x[2], x[0])))
+        # Calculate loss by taking mean of distance from mergin to point
+        loss = margins.map(lambda x: (1, (np.sum(x[2]), 1.0)))\
+                    .reduceByKey(lambda x1, x2: (x1[0] + x2[0], x1[1] + x2[1]))
+        loss = loss.collect()[0][1]
+        loss = loss[0] / loss[1]
+        # Set binary by setting one if the distance from margin is over than zero.
+        binary = margins.map(lambda x: (x[0], x[1], getBinary(x[2])))
+        # Set the correctly classified case to negative one or zero
+        row_sum = binary.map(lambda x: (x[0], x[1], x[2], np.sum(x[2])))
+        trueBinary = row_sum.map(lambda x: (x[0], x[1], changeToRowSum(x[2], x[0], x[3])))
+        # Get derivative of yx part, if j = yi, -x, otherwise x 
+        dW = trueBinary.map(lambda x: (1,  getDw(x[1], x[2])))\
+                        .reduceByKey(lambda x1, x2: np.add(x1, x2))
+        dW = dW.collect()[0][1].reshape(-1, 2)
+        # Average
+        dW /= num_train
+        dW += reg * W
+        
+        return loss, dW
+
+    # Set initial weights (200000, 2)
+    W = np.full((20000, 2), 0.1)
     num_iteration = 100
     learningRate = 0.01
-    r_prev= np.full(20000, 0.01)
     count = 0
-    cost_prev = sys.float_info.max
-    precision = 0.00000001
-    prev_stepsize = 1
-    while(num_iteration > count and precision < prev_stepsize):
-        start = time.time()
-
-        # Calculate cost and derivative
-        costAndDerivative = data.map(lambda x: (x[0], x[1], calculateTheta(x[1], r_prev)))\
-                                .map(lambda x: (1, np.append(getLLH(x[1], x[0], x[2]), getDerivative(x[1], x[0], x[2]))))\
-                                .reduceByKey(lambda x1, x2:np.add(x1, x2)).collect()
-    # data.map(lambda x: (1, getCostAndDerivative(x[1], x[0], r_prev)))\
-    #                         .reduceByKey(lambda x1, x2: np.add(x1, x2)).collect()
-
-        cost_cur = costAndDerivative[0][1][0]
-        dr = costAndDerivative[0][1][1:]
-
-
-        # Set current weight 
-        r_cur = np.subtract(r_prev, learningRate*dr)
-
-
-
+    reg = 0.1
+    loss_prev =  sys.float_info.max
+    train_start = time.time()
+    while num_iteration > count:
+        
+        loss, dW = svm_loss(W, reg)
+        
+        W = np.subtract(W, learningRate*dW)
+        
         # Bold Driver logic
-        if cost_cur < cost_prev:
+        if loss < loss_prev:
             learningRate *= 1.05
         else:
             learningRate *= 0.5
 
         print("Iteration: ", count)
-        print("W: " ,r_cur)
-        print("Loss: ", cost_cur)
+        print("W: " ,W)
+        print("Loss: ", loss)
+        
+        loss_prev = loss
 
         count += 1
 
-        # Calculate stepsize
-        prev_stepsize = np.linalg.norm(np.subtract(r_prev, r_cur), 2)
+    W_true = W[np.arange(len(W)), np.argmax(W, axis = 1)]
+    train_stop = time.time()
+    train_duration = train_stop - train_start
 
-        r_prev = r_cur
-
-        cost_prev = cost_cur
-
-        stop = time.time()
-        duration = stop - start
-        print("Duration", duration)
     ################ Test ################
     # Get test data ready for prediction.
+    test_start = time.time()
     test_corpus = sc.textFile(sys.argv[2], 1)
     test_keyAndText = test_corpus.map(lambda x : (x[x.index('id="') + 4 : x.index('" url=')], x[x.index('">') + 2:][:-6]))
     regex = re.compile('[^a-zA-Z]')
@@ -172,11 +182,9 @@ if __name__ == "__main__":
     test_allDictionaryWordsInEachDoc = test_justDocAndPos.groupByKey()
     test_tfs = test_allDictionaryWordsInEachDoc.map(lambda x: (x[0], buildArray(x[1])))
     test = test_tfs.map(lambda x: (oneHotEncoding(x[0]), x[1], x[0]))
-
-    # Calculate prediction.
-    prediction = test.map(lambda x: (x[0], np.dot(x[1], r_cur), x[2]))\
+    prediction = test.map(lambda x: (x[0], np.dot(x[1], W_true), x[2]))\
                  .map(lambda x: (x[0], (1 if x[1] >= 0 else 0), x[2]))
-    # Calculate TP, TN, FN, FP
+
     type1AndType2 = prediction.map(lambda x: (x[2], getType1AndType2(x[0], x[1])))
     matric = type1AndType2.map(lambda x: (1, x[1])).reduceByKey(lambda x1, x2: np.add(x1, x2)).collect()
 
@@ -184,12 +192,12 @@ if __name__ == "__main__":
     TN = matric[0][1][1]
     FN = matric[0][1][2]
     FP = matric[0][1][3]
-    # Get F1 score
+
     f1_score = getF1score(TP, TN, FN, FP)
-    print("F1-score", f1_score)
-    # Get documents which are False positive.
-    docFP = type1AndType2.filter(lambda x: x[1][3] == 1).take(3)
-    docFPID = [d[0] for d in docFP]
-    pickedDoc = test_keyAndText.filter(lambda x: x[0] in docFPID)
-    pickedDoc.saveAsTextFile(sys.argv[3])
-    sc.stop()
+    test_stop = time.time()
+    test_duration = test_stop - test_start
+
+    print("F score: ",f1_score)
+    print("Read time: ", read_duration)
+    print("Train time: ", train_duration)
+    print("Test time: ", test_duration)
