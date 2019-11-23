@@ -23,19 +23,19 @@ def buildArray (listOfIndices):
     return returnVal
 
 def getType1AndType2(true, pred):
-    if true == 1.0 and pred == 1.0:
+    if true == 1 and pred == 1:
         TP = 1.0
     else:
         TP = 0.0
-    if true == 0.0 and pred == 0.0:
+    if true == 0 and pred == 0:
         TN = 1.0
     else:
         TN = 0.0
-    if true == 1.0 and pred == 0.0:
+    if true == 1 and pred == 0:
         FN = 1.0
     else:
         FN = 0.0
-    if true == 0.0 and pred == 1.0:
+    if true == 0 and pred == 1:
         FP = 1.0
     else:
         FP = 0.0
@@ -68,6 +68,23 @@ def getF1score(TP, TN, FN, FP):
     recall = TP / (TP + FN)
     f_score = 2 * (precision * recall) / (precision + recall)
     return f_score
+
+def getMax(y, wx):
+    # max(0, xw - xw_true) + delta
+    return np.maximum(0.0, (1 - y*wx))
+
+def biggerThanOne(y, wx, x):
+    if (y * wx) >= 1.0:
+        return np.zeros(20000)
+    else:
+        return -y*x
+
+
+def getPrediction(wx):
+    if wx >= 1.0:
+        return 1.0
+    else:
+        return 0.0
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
@@ -107,42 +124,54 @@ if __name__ == "__main__":
     # Get sample number of train data
     num_train = data.count()
 
+
     def svm_loss(W, reg):
-        # Set initial dW as zero
         dW = np.zeros(W.shape)
-        # To get scores do dot product of X (n, 200000) and W (200000, 2)
         scores = data.map(lambda x: (x[0], x[1], np.dot(x[1], W)))
-        # Select one correctly categorized point.
-        yi_scores = scores.map(lambda x: (x[0], x[1], x[2], x[2][x[0]]))
-        # Calculate margin and ignore the correctlly classified points by setting them 0.
-        preMargins = yi_scores.map(lambda x: (x[0], x[1], getPreMargin(x[2], x[3])))
-        margins = preMargins.map(lambda x: (x[0], x[1], changeToZero(x[2], x[0])))
-        # Calculate loss by taking mean of distance from mergin to point
-        loss = margins.map(lambda x: (1, (np.sum(x[2]), 1.0)))\
-                    .reduceByKey(lambda x1, x2: (x1[0] + x2[0], x1[1] + x2[1]))
-        loss = loss.collect()[0][1]
-        loss = loss[0] / loss[1]
-        # Set binary by setting one if the distance from margin is over than zero.
-        binary = margins.map(lambda x: (x[0], x[1], getBinary(x[2])))
-        # Set the correctly classified case to negative one or zero
-        row_sum = binary.map(lambda x: (x[0], x[1], x[2], np.sum(x[2])))
-        trueBinary = row_sum.map(lambda x: (x[0], x[1], changeToRowSum(x[2], x[0], x[3])))
-        # Get derivative of yx part, if j = yi, -x, otherwise x 
-        dW = trueBinary.map(lambda x: (1,  getDw(x[1], x[2])))\
-                        .reduceByKey(lambda x1, x2: np.add(x1, x2))
-        dW = dW.collect()[0][1].reshape(-1, 2)
-        # Average
-        dW /= num_train
-        dW += reg * W
-        
+        yi_score = scores.map(lambda x: (1, getMax(x[0], x[2]))) \
+            .reduceByKey(lambda x1, x2: x1 + x2).collect()
+        loss = 0.5 * reg * np.dot(W, W) + yi_score[0][1] / num_train
+        dW = scores.map(lambda x: (1, biggerThanOne(x[0], x[2], x[1]))) \
+            .reduceByKey(lambda x1, x2: np.add(x1, x2)).collect()
+        dW = np.add(reg * W, (dW[0][1] / num_train).T)
         return loss, dW
+    # def svm_loss(W, reg):
+    #     # Set initial dW as zero
+    #     dW = np.zeros(W.shape)
+    #     # To get scores do dot product of X (n, 200000) and W (200000, 2)
+    #     scores = data.map(lambda x: (x[0], x[1], np.dot(x[1], W)))
+    #     # Select one correctly categorized point.
+    #     yi_scores = scores.map(lambda x: (x[0], x[1], x[2], x[2][x[0]]))
+    #     # Calculate margin and ignore the correctlly classified points by setting them 0.
+    #     preMargins = yi_scores.map(lambda x: (x[0], x[1], getPreMargin(x[2], x[3])))
+    #     margins = preMargins.map(lambda x: (x[0], x[1], changeToZero(x[2], x[0])))
+    #     # Calculate loss by taking mean of distance from mergin to point
+    #     loss = margins.map(lambda x: (1, (np.sum(x[2]), 1.0)))\
+    #                 .reduceByKey(lambda x1, x2: (x1[0] + x2[0], x1[1] + x2[1]))
+    #     loss = loss.collect()[0][1]
+    #     loss = loss[0] / loss[1]
+    #     loss += 0.5 * reg * np.sum(W * W)
+    #     # Set binary by setting one if the distance from margin is over than zero.
+    #     binary = margins.map(lambda x: (x[0], x[1], getBinary(x[2])))
+    #     # Set the correctly classified case to negative one or zero
+    #     row_sum = binary.map(lambda x: (x[0], x[1], x[2], np.sum(x[2])))
+    #     trueBinary = row_sum.map(lambda x: (x[0], x[1], changeToRowSum(x[2], x[0], x[3])))
+    #     # Get derivative of yx part, if j = yi, -x, otherwise x
+    #     dW = trueBinary.map(lambda x: (1,  getDw(x[1], x[2])))\
+    #                     .reduceByKey(lambda x1, x2: np.add(x1, x2))
+    #     dW = dW.collect()[0][1].T
+    #     # Average
+    #     dW /= num_train
+    #     dW += reg * W
+    #
+    #     return loss, dW
 
     # Set initial weights (200000, 2)
-    W = np.full((20000, 2), 0.1)
+    W = np.full((20000), 1.5)
     num_iteration = 100
     learningRate = 0.01
     count = 0
-    reg = 0.1
+    reg = 1.0
     loss_prev =  sys.float_info.max
     train_start = time.time()
     while num_iteration > count:
@@ -165,7 +194,7 @@ if __name__ == "__main__":
 
         count += 1
 
-    W_true = W[np.arange(len(W)), np.argmax(W, axis = 1)]
+    #W_true = W[np.arange(len(W)), np.argmax(W, axis = 1)]
     train_stop = time.time()
     train_duration = train_stop - train_start
 
@@ -182,8 +211,8 @@ if __name__ == "__main__":
     test_allDictionaryWordsInEachDoc = test_justDocAndPos.groupByKey()
     test_tfs = test_allDictionaryWordsInEachDoc.map(lambda x: (x[0], buildArray(x[1])))
     test = test_tfs.map(lambda x: (oneHotEncoding(x[0]), x[1], x[0]))
-    prediction = test.map(lambda x: (x[0], np.dot(x[1], W_true), x[2]))\
-                 .map(lambda x: (x[0], (1 if x[1] >= 0 else 0), x[2]))
+    prediction = test.map(lambda x: (x[0], np.dot(x[1], W), x[2]))\
+                 .map(lambda x: (x[0], np.argmax(x[1]), x[2]))
 
     type1AndType2 = prediction.map(lambda x: (x[2], getType1AndType2(x[0], x[1])))
     matric = type1AndType2.map(lambda x: (1, x[1])).reduceByKey(lambda x1, x2: np.add(x1, x2)).collect()
@@ -197,6 +226,10 @@ if __name__ == "__main__":
     test_stop = time.time()
     test_duration = test_stop - test_start
 
+    print("TP: ", TP)
+    print("TN: ", TN)
+    print("FN: ", FN)
+    print("FP: ", FP)
     print("F score: ",f1_score)
     print("Read time: ", read_duration)
     print("Train time: ", train_duration)

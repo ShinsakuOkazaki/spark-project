@@ -183,7 +183,7 @@ if __name__ == "__main__":
 
         count += 1
 
-    W_true = W[np.arange(len(W)), np.argmax(W, axis = 1)]
+    #W_true = W[np.arange(len(W)), np.argmax(W, axis = 1)]
     train_stop = time.time()
     train_duration = train_stop - train_start
 
@@ -200,8 +200,8 @@ if __name__ == "__main__":
     test_allDictionaryWordsInEachDoc = test_justDocAndPos.groupByKey()
     test_tfs = test_allDictionaryWordsInEachDoc.map(lambda x: (x[0], buildArray(x[1])))
     test = test_tfs.map(lambda x: (oneHotEncoding(x[0]), x[1][columnIdx], x[0]))
-    prediction = test.map(lambda x: (x[0], np.dot(x[1], W_true), x[2]))\
-                 .map(lambda x: (x[0], (1 if x[1] >= 0 else 0), x[2]))
+    prediction = test.map(lambda x: (x[0], np.dot(x[1], W), x[2]))\
+                 .map(lambda x: (x[0], np.argmax(x[1]), x[2]))
 
     type1AndType2 = prediction.map(lambda x: (x[2], getType1AndType2(x[0], x[1])))
     matric = type1AndType2.map(lambda x: (1, x[1])).reduceByKey(lambda x1, x2: np.add(x1, x2)).collect()
@@ -214,7 +214,10 @@ if __name__ == "__main__":
     f1_score = getF1score(TP, TN, FN, FP)
     test_stop = time.time()
     test_duration = test_stop - test_start
-
+    print("TP: ", TP)
+    print("TN: ", TN)
+    print("FN: ", FN)
+    print("FP: ", FP)
     print("F score: ",f1_score)
     print("Read time: ", read_duration)
     print("Train time: ", train_duration)
